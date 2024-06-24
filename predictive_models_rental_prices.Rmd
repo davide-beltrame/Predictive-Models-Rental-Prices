@@ -1,0 +1,1105 @@
+---
+title: "Predictive Models for Rental Prices in the Brazilian Housing Market"
+author: "Demetrio Francesco Cardile"
+date: "24/05/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
+################ IMPORTANT################
+# Use the outline to navigate the Rmd file
+```
+
+# Data Analysis for Business 2023
+
+## **Final Group Project**
+
+## 1. Picking a data set
+
+The data set we have been provided contains information about 10962 houses to rent in different Brazilian cities, and consists of 12 features (variables), including the target one: **rent amount**.
+
+### Importing libraries and packages
+
+Such as:
+
+-   *ggplot2*, *corrplot*, *ggpubr* and *factoextra* for data visualization;
+
+-   *yardstick* for model evaluation metrics;
+
+-   *caret* for unified machine learning workflows;
+
+-   *tsne* and *Rtsne* for dimensionality reduction;
+
+-   *ISLR2* and *MASS* for datasets and statistical learning methods;
+
+-   *mvtnorm* for multivariate distributions.
+
+```{r, fig.keep='none'}
+
+#install.packages("corrplot")
+library(data.table)
+library(tsne)
+library(viridis)
+library(dendextend)
+library(colorspace)
+library(Rtsne)
+library(factoextra)
+library(cluster)
+library(ISLR2)
+library(MASS)
+library(mvtnorm)
+library(ggpubr)
+library(mclust)
+library(scatterplot3d)
+library(yardstick)
+library(corrplot)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+library(glmnet)
+library(randomForest)
+library(class)
+library(xgboost)
+library(splines)
+```
+
+```{r}
+
+# importing the data set
+
+data_raw <- read.csv("./BrazHousesRent.csv",
+                    header = T,
+                    sep = ",",
+                    stringsAsFactors = T)
+```
+
+## 2. Description of the data set
+
+We rename some columns in order for the code to be more readable.
+
+```{r}
+
+# Renaming some columns to be more efficient
+colnames(data_raw)[5] <- "parking_spaces"
+colnames(data_raw)[9] <- "hoa"
+colnames(data_raw)[10] <- "rent_amount"
+colnames(data_raw)[11] <- "property_tax"
+colnames(data_raw)[12] <- "fire_insurance"
+```
+
+### 2.1. Overview of the data set
+
+The structure of the data set reveals that we have 10692 observations and 12 variables.
+
+Three of those (*city*, *animal* and *furniture*) are categorical, while the remaining nine (*area*, *rooms*, *bathroom*, *parking_spaces*, *floor*, *hoa*, *rent_amount*, *property_tax* and *fire_insurance*) are numerical, in particular they are integers.
+
+```{r, results='hide'}
+
+# Structure of the dataset
+str(data_raw)
+```
+
+```{r, results='hide'}
+
+# Summary of the dataset
+summary(data_raw)
+```
+
+### 2.2. Handling duplicates, missing values and outliers
+
+In order to detect the missing values, we replace them with NA.
+
+```{r}
+
+# Replacing missing values: notice that missing values are expressed as "-"
+data_raw[data_raw == "-"] <- NA
+```
+
+Moreover, we investigate the data set in order to understand which are the variables having null values.
+
+```{r, results='hide'}
+
+# Find variable names with null values
+null_vars <- colnames(data_raw)[apply(is.na(data_raw), 2, any)]
+
+# Print the variable names
+print(null_vars) # this shows that floor is the only variable with null val
+```
+
+#### 2.2.2. Converting NA into 0
+
+We noticed that null values are present only in the variable *floor*. Hence, we replace them with 0, as we assume they represent ground floors (small houses).
+
+```{r, results='hide'}
+
+# Convert "floor" to character type
+data_raw$floor <- as.character(data_raw$floor)
+
+# Replace NA values with "0"
+data_raw$floor[is.na(data_raw$floor)] <- "0"
+
+# Convert "floor" back to integer type
+data_raw$floor <- as.integer(data_raw$floor)
+
+# Showing an overview of data to make sure "floor" was converted to int type
+str(data_raw)
+```
+
+#### 2.2.3. Removing duplicates
+
+We find 363 duplicates and we remove them.
+
+```{r, results='hide'}
+
+# Search for duplicates based on all variables in the data frame
+duplicates <- duplicated(data_raw)
+num_duplicates <- sum(duplicates)
+print(num_duplicates)
+
+# Create a subset of the data frame without duplicates
+data_raw_wd <- subset(data_raw, !duplicates)
+```
+
+#### 2.2.4. Removing outliers
+
+More specifically, for every variable we plot a box plot for its distribution, thus to search for outliers.
+
+```{r, fig.align='center', out.width = "75%"}
+
+# Create a list of numeric variables
+numeric_vars <- names(data_raw_wd)[sapply(data_raw_wd, is.numeric)]
+
+# Set the number of rows and columns for the subplot layout
+num_rows <- ceiling(sqrt(length(numeric_vars)))
+num_cols <- ceiling(length(numeric_vars) / num_rows)
+
+# Set up the plotting environment
+par(mfrow = c(num_rows, num_cols), col = "blue")
+
+# Loop over each numeric variable and create a boxplot subplot
+for (i in 1:length(numeric_vars)) {
+  var <- numeric_vars[i]
+  boxplot(data_raw_wd[[var]], horizontal = TRUE, main = var)
+}
+
+# Reset the plotting environment
+par(mfrow = c(1, 1))
+```
+
+As one may notice, some variables do not show many outliers, while some others do (including the target variable *rent amount*). Anyway, removing outliers using the traditional approach of the *interquartile range* may turn out to be extremely rigid. Hence, we remove outliers based on certain conditions based on visual inspection.
+
+```{r, results='hide'}
+
+# Create a logical condition for each outlier criterion
+condition_1 <- data_raw_wd$area <= 1000 & # close to 6*IQR
+  data_raw_wd$rooms <= 10 & # close to 6*IQR
+  data_raw_wd$bathroom <= 5 & # visual
+  data_raw_wd$parking_spaces <= 6 & # close to 3*IQR
+  data_raw_wd$floor <= 30 & # close to 3*IQR
+  data_raw_wd$hoa <= 10000 & # close to 6*IQR
+  data_raw_wd$rent_amount <= 15000 & # close to 3*IQR
+  data_raw_wd$property_tax <= 5000 & # visual
+  data_raw_wd$fire_insurance <= 250 # close to 4*IQR
+
+# Subset the dataset based on the condition
+data_raw_wo <- subset(data_raw_wd, condition_1)
+
+# Number of rows in the dataset without outliers
+nrow(data_raw_wo)
+```
+
+The new data set consists of 10258 rows, meaning that we removed only a few observations regarded as outliers. Let us proceed with another method, based on deleting observations that fall out of three times the interquartile range of most variables.
+
+```{r, results='hide'}
+
+condition_2 <- data_raw_wd$area <= 600 & # close to 3*IQR
+  data_raw_wd$rooms <= 6 & # close to 3*IQR
+  data_raw_wd$bathroom <= 3 & # visual
+  data_raw_wd$parking_spaces <= 5 & # close to 3*IQR
+  data_raw_wd$floor <= 30 & # close to 3*IQR
+  data_raw_wd$hoa <= 5000 & # close to 3*IQR
+  data_raw_wd$rent_amount <= 15000 & # close to 3*IQR
+  data_raw_wd$property_tax <= 1500 & # close to 3*IQR
+  data_raw_wd$fire_insurance <= 220 # close to 3*IQR
+
+# Subset the dataset based on the condition
+data_raw_wo <- subset(data_raw_wd, condition_2)
+
+# Number of rows in the dataset without outliers
+nrow(data_raw_wo)
+
+# Number of rows removed
+nrow(data_raw_wd) - nrow(data_raw_wo)
+(nrow(data_raw) - nrow(data_raw_wo))*100/nrow(data_raw_wd)
+(nrow(data_raw_wd) - nrow(data_raw_wo))*100/nrow(data_raw_wd)
+```
+
+In this case we get 9640 rows, which correspond to 10.2% fewer rows compared to the raw data set and 6.7% fewer with respect to the data set without duplicates. We deem this reduction to be reasonable, thus we go on with the insights.
+
+### 2.3. Insights
+
+#### 2.3.1. Displaying the distribution of target variable
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Histogram to display the distribution of target variable
+hist(data_raw_wo$rent_amount, col = "blue", main = "Histogram of Rent Amount", xlab = "Rent Amount", ylab = "Frequency")
+```
+
+As one may notice from the distribution, the target variable is right skewed, hence the distribution is asymmetric. This must be taken into account when choosing, in the following sections, how to evaluate the performances of the models.
+
+#### 2.3.2. Investigating possible relationships among variables
+
+```{r}
+
+# Select only the numeric variables from your dataset
+numeric_vars <- data_raw[, sapply(data_raw, is.numeric)]
+
+# Calculate the correlation matrix
+cor_matrix <- cor(numeric_vars)
+```
+
+```{r, fig.align='center', out.width = "45%"}
+
+# Customize the correlation plot
+corrplot(cor_matrix, method = "number", type = "upper", order = "hclust", 
+         col = colorRampPalette(c("#FDE725", "#440154"))(100),
+         tl.col = "black", tl.srt = 45)
+```
+
+The correlation matrix of the numeric variables above shows an interesting fact: an extremely high correlation (almost 99%) between *fire insurance* and *rent amount*.
+
+#### 2.3.3. Overview of the numerical variables
+
+We plot several subplots, each showing the distribution of a numeric variable, thus to have a general overview.
+
+```{r, fig.align='center', out.width = "75%"}
+
+# Select numeric variables from the data_raw_wo dataset
+numeric_vars <- sapply(data_raw_wo, is.numeric)
+data_numeric <- data_raw_wo[, numeric_vars]
+
+# Calculate the number of rows and columns for the grid
+num_vars <- sum(numeric_vars)
+num_rows <- ceiling(sqrt(num_vars))
+num_cols <- ceiling(num_vars / num_rows)
+
+# Create a list to store the individual histogram plots
+hist_plots <- list()
+
+# Iterate over each numeric variable and create a histogram plot
+for (col in names(data_numeric)) {
+  hist_plots[[col]] <- ggplot(data_raw_wo, aes(x = .data[[col]])) +
+    geom_histogram(fill = "steelblue", color = "white") +
+    labs(title = col) +
+    theme_bw()
+}
+
+# Arrange the histogram plots in a grid
+grid.arrange(grobs = hist_plots, nrow = num_rows, ncol = num_cols)
+```
+
+#### 2.3.4. Investigating some interesting relationships
+
+Moreover, notice that the data set consists, besides the numerical variables, of three categorical ones: *city, furniture, and animal*. In our opinion, it would be interesting to investigate a possible correlation between the rental price and being furnished or not for an apartment.
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Boxplot to show the relation between city and rent amount
+boxplot(data_raw_wo$rent_amount ~ data_raw_wo$city, 
+        xlab = "City",
+        ylab = "Rent Amount",
+        main = "Rent Amount by City",
+        cex.axis = 0.8,  # Adjust the font size of the axis labels
+        cex.main = 0.9,  # Adjust the font size of the main title
+        cex.lab = 0.8)   # Adjust the font size of the axis labels
+```
+
+By looking at the quartiles, and especially at the median, one can deduce that the city slightly influences the rent amount.
+
+```{r, fig.keep='none'}
+
+# Boxplot to show the relation between forniture and rent amount
+boxplot(data_raw_wo$rent_amount ~ data_raw_wo$furniture, 
+        xlab = "Furnished",
+        ylab = "Rent Amount",
+        main = "Rent Amount by Furniture")
+```
+
+The same happens for the furniture, one can deduce that furnished apartments are supposed to have slightly higher rental costs, which is reasonable.
+
+```{r, fig.keep='none'}
+
+# Boxplot to show the relation between animal and rent amount
+boxplot(data_raw_wo$rent_amount ~ data_raw_wo$animal, 
+        xlab = "Animal",
+        ylab = "Rent Amount",
+        main = "Rent Amount by Animal")
+```
+
+For *animal*, one can deduce that the fact of accepting/not accepting animals does not impact the rent amount, which may be something we didn't expect since - in general - house owners charge higher rental prices when they allow for animals, thus to cover expected damages from the latter.
+
+#### 2.3.5. Investigating on some ternary relationships
+
+*GGPlot on ternary relation: rent amount, property tax, fire insurance.*
+
+```{r, fig.align='center', out.width = "50%"}
+
+# GGPlot 
+GGally::ggpairs(data_raw_wo, columns = 10:12)
+```
+
+### 2.4. Scaling and splitting the data set
+
+#### 2.4.1. Creating training set and test set
+
+In this section, we will perform those crucial operations that will allow us to build all the models. More specifically, we will create train set and test set, isolate predictors from the target variable, encode categorical variables as dummy variables, and finally we will scale the data. With respect to this last point, we will scale the predictors of the test set with respect to the mean and standard deviation of the training set.
+
+```{r}
+
+# Create train and test set
+# we divide the entire data set in two partitions (80%, 20%). Then we extract X and # y
+set.seed(27, sample.kind = "Rounding")
+test_index <- createDataPartition(y =data_raw_wo$rent_amount,p = 0.15, list=FALSE)
+train <- data_raw_wo[-test_index,] #creating train set -> 8247 rows
+test <- data_raw_wo[test_index,] #creating test set -> 2064 rows
+
+# Isolate predictors and target variable in the train set
+x_train <- train[, !(names(train) %in% "rent_amount")]
+y_train <- train$rent_amount
+y_train_sc <- log(y_train)
+
+# Isolate predictors and target variable in the test set
+x_test <- test[, !(names(test) %in% "rent_amount")]
+y_test <- test$rent_amount
+y_test_sc <- log(y_test)
+
+```
+
+#### 2.4.2. Scaling the variables
+
+We do this scaling the test set using the standard deviation and the mean of the training set.
+
+```{r, fig.keep='none', results='hide'}
+
+# Create a pre-processing model on the training set to compute mean and standard deviation
+preproc_model <- preProcess(x_train, method = c("center", "scale"))
+
+# Apply the pre-processing model to the training set
+x_train_sc <- predict(preproc_model, x_train)
+
+# Preview the updated scaled training set
+head(x_train_sc)
+
+#--to scale the test set wrt mean and std dev of  training set--#
+
+# Apply the pre-processing model to the test set
+x_test_sc <- predict(preproc_model, x_test)
+
+# Preview the updated scaled test set
+head(x_test_sc)
+```
+
+#### 2.4.3. Converting categorical variables into dummy variables
+
+At this point, we get a total of 17 numerical variables: 8 original numerical variables (the target variable is excluded) plus 5 dummy variables for *city*, and 2 each for *animal* and *furniture*.
+
+```{r, fig.keep='none', results='hide'}
+
+# Create a data frame excluding the factor variables for train set
+x_train_sc_numeric <- x_train_sc[, !(names(x_train_sc) %in% c("city", "animal", "furniture"))]
+
+# Create dummy variables for the factor variables
+dummy_transform <- dummyVars(~ ., data = x_train_sc[, c("city", "animal", "furniture")])
+x_train_dummies <- predict(dummy_transform, newdata = x_train_sc[, c("city", "animal", "furniture")])
+
+# Combine the numeric variables and dummy variables
+x_train_final <- cbind(x_train_sc_numeric, x_train_dummies)
+
+# Verify the structure of the final training set
+str(x_train_final)
+
+# Create a data frame excluding the factor variables for test set
+x_test_sc_numeric <- x_test_sc[, !(names(x_test_sc) %in% c("city", "animal", "furniture"))]
+
+# Create dummy variables for the factor variables using the same transformation
+x_test_dummies <- predict(dummy_transform, newdata = x_test_sc[, c("city", "animal", "furniture")])
+
+# Combine the numeric variables and dummy variables
+x_test_final <- cbind(x_test_sc_numeric, x_test_dummies)
+
+# Verify the structure of the final test set
+str(x_test_final)
+```
+
+## 3. Objective of Task 1
+
+A new company wants to enter the real-estate market, and wants to understand what kind of houses grant the larger (rent) revenue before investing its money: **what are the driving forces leading to high rents?**
+
+These data have been collected in order to better understand the house-rent market in some of the most important cities in Brazil. A new company wants to enter the real-estate market, and wants to understand what kind of houses grant the larger (rent) revenue before investing its money: **what are the driving forces leading to high rents?\
+**Furthermore, we may want to segment the rent-houses market in different groups: **does it check with the geographical positioning?**
+
+In this first task we try to answer the first question and build a predictive model to find out the rent amount according to the house specifics.
+
+### Task description
+
+In the following sections, we are going to build some predictive models able to predict the *rent amount* of a certain house, based on the house specifics, thus to help a new company that wants to enter the real-estate market and desires to understand what kind of houses grant the larger rent revenues.
+
+## 4. Lower-dimensional model
+
+### Linear regression using *fire_insurance* and *hoa*
+
+```{r}
+### 3.1.3. Linear regression with fire insurance and hoa #### 
+
+mod3 <- lm(y_train ~ hoa + fire_insurance, data = x_train_sc)
+summary(mod3) # TRIED FIRE_INSURANCE AND ONE AMONG ALL THE OTHERS PREDICTORS 
+# HOA, yields the highest R^2 (0.9832)
+```
+
+This model yields a RMSE of 386.2, the lowest value among the lower-dimensional models.
+
+```{r, fig.keep='none', results='hide'}
+# Predict the response variable
+y_pred3<- predict(mod3)
+
+# Calculate the residuals
+residuals3<- y_train - y_pred3
+
+# Calculate RMSE
+rmse3<- sqrt(mean(residuals3^2))
+rmse3
+```
+
+## 5. Best models
+
+### 5.1. Linear models
+
+In summary, we performs stepwise variable selection using the AIC criterion for linear regression models and compare the previous with the full model. We then calculates the RMSE to assess the model's prediction performance, which turns out to be 0.2501167.
+
+```{r, fig.keep='none', results='hide'}
+
+mod <- lm(y_train_sc ~ ., data = x_train_sc)
+mod4 <- lm(y_train_sc ~ fire_insurance, data = x_train_sc)
+
+lin_fit_aic <- step(lm(y_train_sc ~ 1,
+                           data = x_train_sc),
+                       scope = list(upper = mod, # the maximum to consider is a model with all variables
+                                    lower = mod4), # the minimum to consider is a model with only fire_insurance
+                       direction = c("both", "backward", "forward"),
+                       k=2)
+
+
+anova(mod, lin_fit_aic, test = "Chisq")
+rmse_aic<- sqrt(mean(residuals(lin_fit_aic)^2))
+rmse_aic
+```
+
+### 5.2. Penalised approaches
+
+In the following sections, we will explore all the three penalised approaches discussed in the course. We are going to focus on Ridge Regression first, then on Lasso Regression, and finally on Elastic Net, which represents a combination of the previous two. Moreover, all the models you find attached to this section are built using cross-validation.
+
+#### 5.2.1. Ridge Regression
+
+```{r, fig.keep='none', results='hide'}
+
+# Fit ridge regression model using cross validation
+ridge_model <- cv.glmnet(as.matrix(x_train_final), y_train_sc, alpha = 0, nfolds = 10)
+
+# Find the optimal lambda value
+lambda_optimal_ridge <- ridge_model$lambda.1se
+
+```
+
+The result below, namely the RMSE computed from the predictions on test set, does not use the minimum value of *lambda*. In fact, recalling the theory, we decided to opt for a slightly higher value that is within the range of *lambda min + 1 standard deviation*.
+
+RMSE of Ridge Regression: 0.26695
+
+```{r, fig.keep='none', results='hide'}
+
+# Fit ridge regression model with the optimal lambda
+ridge_model_optimal <- glmnet(as.matrix(x_train_final), y_train_sc, alpha = 0, lambda = lambda_optimal_ridge)
+
+# Predict on the test set using the optimal ridge model
+y_pred_ridge_optimal <- predict(ridge_model_optimal, newx = as.matrix(x_test_final))
+
+# Calculate RMSE of optimal model
+rmse_ridge_optimal <- sqrt(mean((y_pred_ridge_optimal - y_test_sc)^2))
+print(rmse_ridge_optimal)
+```
+
+**Plotting cross-validation curve**
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Plot the cross-validation curve
+plot(ridge_model)
+```
+
+**Plotting predicted vs Actual values**
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Plot predicted vs. actual values
+plot(y_test_sc, y_pred_ridge_optimal, xlab = "Actual Values", ylab = "Predicted Values", main = "Predicted vs. Actual (Ridge Regression)")
+```
+
+#### 5.2.2. LASSO Regression
+
+```{r, fig.keep='none', results='hide'}
+
+my_lam <- seq(from = 0.001, to = 2, length.out = 100)
+
+# Automatic CV
+lasso_cv <- cv.glmnet(x = as.matrix(x_train_final),
+                      y = y_train_sc, 
+                      lambda = my_lam, 
+                      alpha = 1,
+                      family = "gaussian")
+
+# Best lambda (minimizing the average MSE over the folds)
+lasso_cv$lambda.min
+
+# Preferred best value: largest value of lambda such that error is within 1 
+# standard error of the minimum.
+lasso_cv$lambda.1se
+
+# In such a way, the regularization is stronger, but we are not so far from the
+# global minimum.
+(lambda_star <- lasso_cv$lambda.1se) 
+
+# Get the estimated coefficients for the chosen lambda
+coef(lasso_cv,
+     s = lambda_star)
+
+# Predictions on the test set using the best lambda
+predict(lasso_cv, 
+        newx = as.matrix(x_test_final),
+        s = lambda_star)
+```
+
+Once again, the prediction on which the RMSE is computed, is based on the optimal value of lambda that we discussed before and not on the minimum one.
+
+RMSE of Lasso Regression: 0.260407
+
+```{r, fig.keep='none', results='hide'}
+
+# Compute the RMSE using the best lambda value
+y_pred_lasso <- predict(lasso_cv, newx = as.matrix(x_test_final), s = lasso_cv$lambda.1se)
+rmse_lasso <- sqrt(mean((y_pred_lasso - y_test_sc)^2))
+
+# Print the RMSE
+print(rmse_lasso)
+```
+
+Moreover, as we know Lasso regression is a model performing feature selection, hence it sets some variables equal to 0, through penalisations. The variables excluded by the model are *animal.not acept* and *furniture.not furnished*. Variable *fire_insurance* is the less penalised, as expected.
+
+```{r, fig.keep='none', results='hide'}
+
+# Get the estimated coefficients for the chosen lambda
+lasso_coef <- coef(lasso_cv, s = lambda_star)
+lasso_coef
+# Extract the excluded variables
+excluded_vars <- rownames(lasso_coef)[lasso_coef[, 1] == 0]
+
+# Print the excluded variables
+print(excluded_vars)
+```
+
+**Cross-validation scores against lambda**
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Plot the CV score against lambda
+# plot(lasso_cv$lambda, 
+#     lasso_cv$cvm,
+#     type = "l", 
+#     lty = 1, 
+#     ylab = "Error",
+#     xlab = expression(lambda))
+plot(lasso_cv)
+```
+
+#### 5.2.3. Elastic Net
+
+```{r, fig.keep='none', results='hide'}
+
+# Perform cross-validation for elastic net
+elasticnet_cv <- cv.glmnet(x = as.matrix(x_train_final),
+                           y = y_train_sc,
+                           alpha = 0.5,  # Set the alpha parameter for elastic net (0.5 for equal mix of L1 and L2 penalties)
+                           lambda = NULL,  # Set to NULL to let the function determine the lambda values automatically
+                           nfolds = 10)  # Set the number of folds for cross-validation
+
+# Find the optimal lambda value
+lambda_optimal_enet <- elasticnet_cv$lambda.min
+
+# Fit the elastic net model with the optimal lambda
+elasticnet_model <- glmnet(x = as.matrix(x_train_final),
+                           y = y_train_sc,
+                           alpha = 0.5,  # Set the alpha parameter for elastic net (0.5 for equal mix of L1 and L2 penalties)
+                           lambda = lambda_optimal_enet)
+
+# Predict on the test set using the optimal elastic net model
+y_pred_enet <- predict(elasticnet_model, newx = as.matrix(x_test_final))
+```
+
+RMSE of Elastic Net: 0.260385
+
+```{r, fig.keep='none', results='hide'}
+
+rmse_enet <- sqrt(mean((y_pred_enet - y_test_sc)^2))
+print(rmse_enet)
+```
+
+### 5.3. Non-linear models
+
+Among all the non-linear models discussed in class, we decided to pick XGBoost and Regression Splines (hence both B-splines and Natural splines). Notice that in the file *code_work1* it is possible to visualize some a further model, namely Random Forest. In fact, we decided to implement it for the sake of completeness, but we avoided to include it in this section due to time-complexity issues.
+
+#### 5.3.1. XGBoost
+
+```{r, fig.keep='none', results='hide'}
+
+# Convert the data to DMatrix format
+dtrain <- xgb.DMatrix(data = as.matrix(x_train_final), label = y_train_sc)
+dtest <- xgb.DMatrix(data = as.matrix(x_test_final), label = y_test_sc)
+
+# Set the parameters for XGBoost
+params <- list(
+  objective = "reg:squarederror",  # Objective function for regression
+  eval_metric = "rmse",            # Evaluation metric
+  nrounds = 100,                   # Number of boosting iterations
+  early_stopping_rounds = 10,      # Early stopping rounds
+  verbose = 0                      # Print messages during training
+)
+
+# Perform cross-validation with XGBoost
+xgb_cv <- xgb.cv(
+  params = params,                 # XGBoost parameters
+  data = dtrain,                   # Training data
+  nrounds = 100,                   # Number of boosting rounds
+  nfold = 5,                       # Number of folds for cross-validation
+  stratified = FALSE,              # Not applicable for regression
+  print_every_n = 10,              # Print evaluation metrics every 10 rounds
+  early_stopping_rounds = 10,      # Early stopping rounds
+  maximize = FALSE,                # Whether to maximize the evaluation metric
+  prediction = TRUE                # Return predictions for the test data
+)
+
+# Get the optimal number of iterations (rounds)
+optimal_rounds <- xgb_cv$best_iteration
+
+# Train the final model with the optimal number of iterations
+xgb_model <- xgb.train(
+  params = params,                 # XGBoost parameters
+  data = dtrain,                   # Training data
+  nrounds = optimal_rounds,        # Optimal number of iterations
+  watchlist = list(train = dtrain, test = dtest),  # Monitoring test set performance
+  verbose = 0                      # Print messages during training
+)
+
+# Make predictions using the final model
+xgb_preds <- predict(xgb_model, dtest)
+```
+
+RMSE of XGBoost: 0.09435
+
+```{r, fig.keep='none', results='hide'}
+
+# RMSE without converting the prediction to original scale
+rmse <- sqrt(mean((xgb_preds - y_test_sc)^2))
+print(rmse)
+```
+
+Here we show the order of importance of variables according to XGBoost.
+
+```{r}
+
+# Plot Feature Importance
+xgb.importance(model = xgb_model)
+```
+
+#### 5.3.2. K-Nearest Neighbor
+
+```{r, fig.keep='none', results='hide'}
+
+# Perform k-Nearest Neighbors using cross-validation
+knn_model <- train(
+  x = x_train_final,
+  y = y_train_sc,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = data.frame(k = seq(1, 20, by = 2))
+)
+
+# Get the optimal k value
+k_optimal <- knn_model$bestTune$k
+
+# Predict on the test set using the optimal k
+knn_final <- knn(
+  train = x_train_final,
+  test = x_test_final,
+  cl = y_train_sc,
+  k = k_optimal
+)
+
+# Convert knn_final to numeric
+knn_final_numeric <- as.numeric(as.character(knn_final))
+
+# Calculate RMSE
+rmse_knn <- sqrt(mean((knn_final_numeric - y_test_sc)^2))
+```
+
+RMSE of KNN: 0.30781
+
+```{r, fig.keep='none', results='hide'}
+
+# Print the RMSE value
+print(rmse_knn)
+```
+
+#### 5.3.3. Regression splines
+
+B-splines yield a RMSE on test data of 0.14572.
+
+```{r, fig.keep='none', results='hide'}
+
+# B-splines with scaled data
+fit_bs <- lm(y_train_sc ~ bs(x = fire_insurance, knots = c(50, 100, 150)) + bs(x = rooms, knots = c(50, 100, 150)), data = x_train_final)
+summary(fit_bs)
+
+# Smoothed B-splines
+fit_bs_smooth <- smooth.spline(x = x_train_final$fire_insurance, y = fitted(fit_bs), spar = 0.5)
+
+# Predict on training set
+predicted_values_bs_train <- predict(fit_bs_smooth, x_train_final$fire_insurance)$y
+rmse_bs_train <- sqrt(mean((predicted_values_bs_train - y_train_sc)^2))
+
+# Print RMSE for training set
+print(paste("RMSE (B-splines - Training Set):", rmse_bs_train))
+
+# Predict on test set
+predicted_values_bs_test <- predict(fit_bs_smooth, x_test_final$fire_insurance)$y
+rmse_bs_test <- sqrt(mean((predicted_values_bs_test - y_test_sc)^2))
+
+# Print RMSE for test set
+print(paste("RMSE (B-splines - Test Set):", rmse_bs_test))
+```
+
+Natural splines yield a RMSE on test data of 0.1335.
+
+```{r, fig.keep='none', results='hide'}
+
+# Natural splines with scaled data
+fit_ns <- lm(y_train_sc ~ ns(fire_insurance, df = 3) + ns(hoa, df = 3), data = x_train_final)
+summary(fit_ns)
+
+# Smoothed natural splines
+fit_ns_smooth <- smooth.spline(x = x_train_final$fire_insurance, y = fitted(fit_ns), spar = 0.5)
+
+# Predict on training set
+predicted_values_ns_train <- predict(fit_ns_smooth, x_train_final$fire_insurance)$y
+rmse_ns_train <- sqrt(mean((predicted_values_ns_train - y_train_sc)^2))
+
+# Print RMSE for training set
+print(paste("RMSE (Natural splines - Training Set):", rmse_ns_train))
+
+# Predict on test set
+predicted_values_ns_test <- predict(fit_ns_smooth, x_test_final$fire_insurance)$y
+rmse_ns_test <- sqrt(mean((predicted_values_ns_test - y_test_sc)^2))
+
+# Print RMSE for test set
+print(paste("RMSE (Natural splines - Test Set):", rmse_ns_test))
+
+```
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Create a data frame for plotting
+df_grid <- data.frame(fire_insurance = seq(min(x_train_final$fire_insurance), max(x_train_final$fire_insurance), length.out = 100))
+
+# Add predicted values from smoothed B-splines
+df_grid$pred_bs <- predict(fit_bs_smooth, df_grid$fire_insurance)$y
+
+# Add predicted values from smoothed natural splines
+df_grid$pred_ns <- predict(fit_ns_smooth, df_grid$fire_insurance)$y
+
+# Plotting
+p0 <- ggplot(data = x_train_final, aes(x = fire_insurance, y = y_train_sc)) +
+  geom_point(color = "blue") +
+  xlab("Fire Insurance") +
+  ylab("Rent Amount (Scaled)")
+
+p <- p0 +
+  geom_line(data = df_grid, mapping = aes(x = fire_insurance, y = pred_bs, color = "B-splines"), lwd = 1) +
+  geom_line(data = df_grid, mapping = aes(x = fire_insurance, y = pred_ns, color = "Natural splines"), lwd = 1) +
+  scale_colour_manual(name = "Spline", 
+                      values = c("B-splines" = "red", "Natural splines" = "green"),
+                      labels = c("B-splines", "Natural splines"))
+
+p 
+```
+
+As we see, Natural splines allow us to build a quite good model using fire insurance.
+
+## 6. Conclusions
+
+After analyzing the data set containing information about houses for rent in different Brazilian cities, we have drawn several conclusions regarding the factors influencing rent prices and have evaluated the performance of our models on the test set.
+
+1\. Cities: The cities that consistently showed higher rent prices were São Paulo, Rio de Janeiro, and Belo Horizonte. These cities seem to have a higher demand for rental properties, resulting in increased rental revenue.
+
+2\. Area, Rooms, Bathroom, and Parking Spaces: These variables, which represent the size and amenities of the properties, showed a small positive correlation with rent prices. However, their impact on rent prices was not significant enough to be considered in our best models. Other factors seemed to have a stronger influence.
+
+3\. Floor: According to feature importance in the Xgboost model, the floor variable emerged as the second most important predictor. However, it is worth noting that its importance was relatively low, suggesting that the floor level may not consistently drive higher rents. This observation could be attributed to the presence of villas or other factors that impact rental preferences.
+
+4\. Animal and Furniture: Houses that accept animals and furnished properties tended to command higher rents. While these variables exhibited some influence on rental prices, they were not significant enough to be included in our final models.
+
+5\. HOA (Homeowners Association Tax) and Fire Insurance: Among the examined variables, HOA and fire insurance demonstrated the strongest relationships with rent prices. In fact, a simple linear regression model incorporating these two variables yielded the best results. Both HOA and fire insurance showed a strong positive correlation with rent amount, suggesting that they play crucial roles in determining rental prices.
+
+6\. Property Tax: Similar to the area variable, property tax displayed a correlation with rent prices. However, its impact was not significant enough to be considered in our best models.
+
+7\. Model Performance: Our selected models, particularly the one based on fire insurance alone, performed well on the test set. We evaluated the models using various metrics and found that they provided accurate predictions of rent prices. The chosen models captured the underlying linear or non-linear relationships between the predictor variables and rent amount.
+
+In summary, our findings indicate that variables such as fire insurance and HOA, along with the city of the property, are key factors influencing rent prices in the Brazilian house rental market. The presence of animals and furniture, as well as the size of the property, also contribute to rental prices to some extent. Understanding these driving forces can help guide the investment decisions of companies entering the real estate market, allowing them to focus on properties with the potential for higher rental revenue.
+
+## 7. Clustering
+
+In this second task, we try to gain insights on the geographical distribution of observations through clustering.
+
+#### 7.1. Feature engineering
+
+We select the correct data type for the variables and scale the new subset.
+
+```{r}
+numeric_vars <- sapply(data_raw_wo, is.numeric)
+data_clustering <- data_raw_wo[, numeric_vars]
+```
+
+```{r}
+set.seed(23)
+# Scaling the data
+data_clustering_sc <- scale(data_clustering)
+# Transform in dataframe
+data_clustering_sc <- as.data.frame(data_clustering_sc)
+```
+
+#### 7.2. Elbow rule
+
+At this point, one crucial question arises: which is the value of *k* one should use? To solve such problem, we use the elbow rule and the average silhouette. For what concerns the elbow rule, the optimal number of clusters often occurs at the "elbow" of the curve. In this case the plot suggests an optimal choice of 2 or 3 clusters.
+
+```{r, fig.align='center', out.width = "50%"}
+# Plotting the elbow curve
+fviz_nbclust(data_clustering_sc, kmeans, method = "wss")+ labs(subtitle = "WSS - Elbow method")
+```
+
+#### 7.3. Average Silhouette
+
+For what concerns the Avg Silhouette plot, we have to choose as value for *k* the one to which corresponds the maximum *average silhouette width*, it is evident that one should pick a *k=3*.
+
+We will pick *k=3* following both the plots and the human logic of clustering: houses can be grouped in 'bad' 'medium' and 'high'.
+
+```{r, fig.align='center', out.width = "50%"}
+# Plotting the Avg. Silhouette plot
+fviz_nbclust(data_clustering_sc, kmeans, method = "silhouette")+ labs(subtitle = "Silhouette method")
+```
+
+#### 7.4. K-Means with k=3
+
+In this case, we obtain three clusters of sizes 2689, 1682, 5269.
+
+The variable km_3\$tot.withinss represents the total within-cluster sum of squares (WCSS) for a specific k-means clustering solution.
+
+The WCSS is calculated by summing up the squared Euclidean distances between each data point and the centroid of its assigned cluster.
+
+A lower value of km_3\$tot.withinss indicates that the data points within each cluster are closer to their respective centroids, implying better cohesion and a more optimal clustering solution. Conversely, a higher value of km_3\$tot.withinss suggests that the data points within the clusters are more dispersed, indicating poorer cohesion and a less optimal clustering solution.
+
+```{r, fig.keep='none', results='hide'}
+km_3 = kmeans(data_clustering_sc, 3, nstart = 1, iter.max = 1e2)
+
+# Silhouette coefficients
+sil_coeff3 = silhouette(km_3$cluster, dist(data_clustering_sc))
+
+# Visualization of silhouette coefficients
+fviz_silhouette(sil_coeff3)
+
+# WSS (k=3)
+km_3$tot.withinss
+```
+
+##### 7.4.1. Clustering visualization
+
+```{r, fig.align='center', out.width = "50%"}
+
+fviz_cluster(km_3, data = data_clustering_sc,
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800"), 
+             
+             geom = "point",
+             
+             ellipse.type = "convex", 
+             
+             ggtheme = theme_bw())
+```
+
+##### 7.4.2. Geographical distinction
+
+Based on the division in clusters, we can analyse whether there are geographical differences between the clusters.
+
+```{r, fig.keep='none', results='hide'}
+
+#Creating the table for geographical clustering
+combined_data <- cbind(data_raw_wo, cluster = km_3$cluster)
+
+city_cluster <- interaction(data_raw_wo$city, km_3$cluster)
+obs_counts <- table(city_cluster)
+obs_counts
+```
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Create data for plotting
+cluster_data <- data.frame(
+  Cluster = c("Cluster 1", "Cluster 2", "Cluster 3"),
+  Belo_Horizonte = c(467, 166, 480),
+  Campinas = c(248, 63, 491),
+  Porto_Alegre = c(255, 52, 814),
+  Rio_de_Janeiro = c(344, 144, 907),
+  Sao_Paulo = c(1375, 1257, 2577)
+)
+
+
+# Set colors for cities
+city_colors <- c("Belo_Horizonte" = "red", "Campinas" = "green", "Porto_Alegre" = "blue",
+                 "Rio_de_Janeiro" = "purple", "Sao_Paulo" = "orange")
+
+# Plotting
+barplot(t(as.matrix(cluster_data[, -1])),
+        beside = TRUE,
+        col = city_colors,
+        main = "City Distribution in Clusters",
+        xlab = "Clusters",
+        ylab = "Number of Instances")
+
+# Create a custom legend
+legend("topleft",
+       legend = colnames(cluster_data[, -1]),
+       col = unique(city_colors),
+       pch = 15,
+       title = "Cities",
+       cex = 0.6)
+```
+
+From the output we can observe that
+
+\- Cluster 1 has the highest number of observations from cities such as São Paulo, Rio de Janeiro, and Porto Alegre. These cities are major metropolitan areas and economic hubs in Brazil.The higher count in Cluster 1 suggests that these cities may share certain similarities or characteristics.
+
+\- Cluster 2 has relatively lower counts across all cities, indicating a smaller number of observations compared to Cluster 1. Belo Horizonte and Rio de Janeiro have relatively higher counts compared to Campinas, Porto Alegre, and São Paulo.
+
+\- Cluster 3 has a higher count in São Paulo compared to other cities. This suggests that São Paulo has a distinct pattern or characteristic within this cluster. The counts of other cities in Cluster 3 are relatively lower compared to Cluster 1, indicating potential differences in geographical distribution.
+
+By analyzing the observation counts in each cluster and comparing them across different cities, we can observe geographical differences
+
+Additionally, visualizations such as plotting the clusters on a geographical map or using spatial analysis techniques could provide a more comprehensive understanding of the geographical differences between the clusters.
+
+#### 7.5. Hierarchical Clustering
+
+In the following section, we will provide the implementation of a hierarchical clustering model to group houses into clusters. As a first step, we will build several models using different linkage methods. They all assume Euclidean distance by default.
+
+```{r}
+
+# Building models
+hc_complete = hclust(dist(data_clustering_sc), method = "complete")
+hc_single = hclust(dist(data_clustering_sc), method = "single")
+hc_ward = hclust(dist(data_clustering_sc), method = "ward.D2")
+hc_average = hclust(dist(data_clustering_sc), method = "average")
+hc_trans = hclust(as.dist( 1 - cor(t(data_clustering_sc))), method="average")
+
+```
+
+##### 7.5.1. Plots of hierarchical clustering
+
+By visually analyzing the results obtained through the different linkage methods, we observed that the best solution is proposed by the Ward's method. We provide the graphical representation below.
+
+```{r, fig.keep='none', results='hide'}
+
+#### Plots of hierarchical clustering
+
+# Plot the dendrogram hc_complete
+plot(hc_complete, labels = FALSE, hang = -1)
+rect.hclust(hc_complete, k = 3, border = "red")
+```
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Plot the dendrogram hc_ward
+plot(hc_ward, labels = FALSE, hang = -1)
+rect.hclust(hc_ward, k = 3, border = "green")
+```
+
+In this case, we obtain three clusters of sizes 6215, 1509, 1916.
+
+```{r, fig.keep='none', results='hide'}
+
+# Cut tree into 3 groups hc_ward
+sub_grp1 <- cutree(hc_ward, k = 3)
+# Geographical division for hc_ward
+table(sub_grp1)
+table(sub_grp1,data_raw_wo$city)
+```
+
+We compute the geographical subdivision of observations based on the hierarchical clustering afromentioned. The results are quite similar to the ones presented with the k-means analysis.
+
+Thanks to the different colors, the dendrograms above clearly show where one should cut the tree in order to obtain the right number of clusters. For instance, in this case one should cut at height about 120 to get three clusters, since a cut at any level below 120 may lead to three clusters or even more.
+
+Below we provide a graphical representation of the clusters.
+
+```{r}
+
+#add a column to store the corrisponding cluster
+data_clustering_sc$sub_grp1 <- as.factor(cutree(hc_ward, k = 3))
+```
+
+```{r, fig.align='center', out.width = "50%"}
+
+#Visualize clusters
+fviz_cluster(list(data = data.matrix(data_clustering_sc), cluster = sub_grp1))
+```
+
+The plot above shows a quite clear distinction among the clusters. We can compare visually with the results obtained for K-means.
+
+```{r, fig.align='center', out.width = "50%"}
+
+# Create data for plotting
+cluster_data <- data.frame(
+  Cluster = c("Cluster 1", "Cluster 2", "Cluster 3"),
+  Belo_Horizonte = c(586, 149, 378),
+  Campinas = c(567, 67, 168),
+  Porto_Alegre = c(882, 56, 183),
+  Rio_de_Janeiro = c(971, 103, 321),
+  Sao_Paulo = c(3209, 1134, 866)
+)
+
+# Set colors for cities
+city_colors <- c("Belo_Horizonte" = "red", "Campinas" = "green", "Porto_Alegre" = "blue",
+                 "Rio_de_Janeiro" = "purple", "Sao_Paulo" = "orange")
+
+# Plotting
+barplot(t(as.matrix(cluster_data[, -1])),
+        beside = TRUE,
+        col = city_colors,
+        main = "City Distribution in Clusters",
+        xlab = "Clusters",
+        ylab = "Number of Instances")
+
+# Create a custom legend
+legend("topright",
+       legend = colnames(cluster_data[, -1]),
+       col = unique(city_colors),
+       pch = 15,
+       title = "Cities",
+       cex = 0.6)
+```
+
+Given the previous bar plot, we observe that the clustering with K-means and Hierarchical method are very similar, as the first and third clusters respectively appear to coincide with the third and the first ones in the other method.
+
+A clear distinction is made for Sao Paulo, which is the most frequent city of our houses, as it appears to be the most dominant in the first cluster. This geographical distinction does not provide a good insight for an agency looking to maximise rent amounts.
